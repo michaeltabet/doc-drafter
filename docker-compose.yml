@@ -1,0 +1,7 @@
+services:
+  doc-drafter:
+    build: .
+    container_name: doc-drafter
+    restart: unless-stopped
+    ports:
+      - "8230:80"
