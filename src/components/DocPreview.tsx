@@ -8,7 +8,7 @@ interface Props {
 }
 
 function escapeHtml(s: string): string {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
 function escapeRegex(s: string): string {
@@ -36,6 +36,11 @@ export default function DocPreview({ rawText, delimiter, formData }: Props) {
   }, [rawText, delimiter, formData]);
 
   return (
-    <div className="doc-content" dangerouslySetInnerHTML={{ __html: html }} />
+    <div
+      className="doc-content"
+      role="document"
+      aria-label="Preview of template document"
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
   );
 }

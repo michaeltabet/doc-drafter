@@ -1,6 +1,6 @@
-import { useState, useMemo, useCallback } from 'react';
+import { useState, useMemo, useCallback, useRef } from 'react';
 import { saveAs } from 'file-saver';
-import type { DelimiterPair } from '../types';
+import type { DelimiterPair, JSONSchema } from '../types';
 import { buildSchema } from '../lib/parser';
 import { generateDocument } from '../lib/api';
 import SchemaForm from './SchemaForm';
@@ -13,7 +13,7 @@ interface Props {
   fileType: string;
   delimiter: DelimiterPair;
   placeholders: string[];
-  schema: any;
+  schema: JSONSchema | null;
   onBack: () => void;
 }
 
@@ -29,12 +29,15 @@ export default function Workspace({
   });
 
   const [showSchema, setShowSchema] = useState(false);
-  const [toast, setToast] = useState('');
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
   const [generating, setGenerating] = useState(false);
+  const toastTimer = useRef<number>(0);
+  const importRef = useRef<HTMLInputElement>(null);
 
-  const notify = useCallback((msg: string) => {
-    setToast(msg);
-    setTimeout(() => setToast(''), 3000);
+  const notify = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    clearTimeout(toastTimer.current);
+    setToast({ message, type });
+    toastTimer.current = window.setTimeout(() => setToast(null), 4000);
   }, []);
 
   const handleGenerate = async () => {
@@ -45,8 +48,8 @@ export default function Workspace({
       const outName = fileName.replace(/\.[^.]+$/, '') + '_filled.' + ext;
       saveAs(blob, outName);
       notify('Document generated!');
-    } catch (e: any) {
-      notify(e.message || 'Generation failed');
+    } catch (e: unknown) {
+      notify(e instanceof Error ? e.message : 'Generation failed', 'error');
     } finally {
       setGenerating(false);
     }
@@ -58,28 +61,24 @@ export default function Workspace({
     notify('JSON exported!');
   };
 
-  const handleImportJson = () => {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.accept = '.json';
-    input.onchange = async () => {
-      if (!input.files?.length) return;
-      const text = await input.files[0].text();
-      try {
-        const data = JSON.parse(text);
-        setFormData((prev) => {
-          const next = { ...prev };
-          for (const ph of placeholders) {
-            if (data[ph] !== undefined) next[ph] = data[ph];
-          }
-          return next;
-        });
-        notify('JSON imported!');
-      } catch {
-        notify('Invalid JSON file');
-      }
-    };
-    input.click();
+  const handleImportFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    try {
+      const text = await f.text();
+      const data = JSON.parse(text);
+      setFormData((prev) => {
+        const next = { ...prev };
+        for (const ph of placeholders) {
+          if (data[ph] !== undefined) next[ph] = data[ph];
+        }
+        return next;
+      });
+      notify('JSON imported!');
+    } catch {
+      notify('Invalid JSON file', 'error');
+    }
+    if (importRef.current) importRef.current.value = '';
   };
 
   const displaySchema = useMemo(() => {
@@ -92,18 +91,26 @@ export default function Workspace({
 
   return (
     <div className="workspace">
-      <div className="panel panel-doc">
+      <a href="#main-form" className="skip-link">Skip to form</a>
+
+      <section className="panel panel-doc" aria-label="Document Preview">
         <div className="panel-header">
-          <span>Document Preview</span>
-          <button className="back-btn" onClick={onBack}>← New Template</button>
+          <h2>Document Preview</h2>
+          <button className="back-btn" onClick={onBack}>
+            <span aria-hidden="true">&larr;</span> New Template
+          </button>
         </div>
         <DocPreview rawText={rawText} delimiter={delimiter} formData={formData} />
-      </div>
+      </section>
 
-      <div className="panel panel-form">
+      <section className="panel panel-form" aria-label="Template Form" id="main-form">
         <div className="panel-header">
-          <span>Form — {placeholders.length} fields</span>
-          <button className="toggle-btn" onClick={() => setShowSchema((s) => !s)}>
+          <h2>Form — {placeholders.length} fields</h2>
+          <button
+            className="toggle-btn"
+            aria-expanded={showSchema}
+            onClick={() => setShowSchema((s) => !s)}
+          >
             {showSchema ? 'Hide' : 'Show'} Schema
           </button>
         </div>
@@ -113,15 +120,36 @@ export default function Workspace({
         <SchemaForm schema={schema} formData={formData} onChange={setFormData} />
 
         <div className="form-actions">
-          <button className="btn btn-primary" onClick={handleGenerate} disabled={generating}>
+          <button
+            className="btn btn-primary"
+            onClick={handleGenerate}
+            disabled={generating}
+            aria-busy={generating}
+          >
             {generating ? 'Generating...' : 'Generate Document'}
           </button>
           <button className="btn btn-outline" onClick={handleExportJson}>Export JSON</button>
-          <button className="btn btn-secondary" onClick={handleImportJson}>Import JSON</button>
+          <input
+            ref={importRef}
+            type="file"
+            accept=".json"
+            className="sr-only"
+            aria-label="Import JSON data file"
+            onChange={handleImportFile}
+          />
+          <button className="btn btn-secondary" onClick={() => importRef.current?.click()}>
+            Import JSON
+          </button>
         </div>
-      </div>
+      </section>
 
-      {toast && <div className="toast show">{toast}</div>}
+      <div role="status" aria-live="polite" aria-atomic="true">
+        {toast && (
+          <div className={`toast show toast-${toast.type}`}>
+            {toast.message}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

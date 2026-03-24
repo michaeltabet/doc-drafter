@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import type { DelimiterPair } from './types';
+import { useState, useEffect, useRef } from 'react';
+import type { DelimiterPair, JSONSchema } from './types';
 import UploadView from './components/UploadView';
 import Workspace from './components/Workspace';
 import './App.css';
@@ -13,34 +13,50 @@ interface WorkspaceState {
   fileType: string;
   delimiter: DelimiterPair;
   placeholders: string[];
-  schema: any;
+  schema: JSONSchema | null;
 }
 
 export default function App() {
   const [view, setView] = useState<View>('upload');
   const [ws, setWs] = useState<WorkspaceState | null>(null);
+  const workspaceRef = useRef<HTMLElement>(null);
 
-  const handleParsed = (
-    rawText: string,
-    fileName: string,
-    file: File,
-    fileType: string,
-    delimiter: DelimiterPair,
-    placeholders: string[],
-    schema: any
-  ) => {
-    setWs({ rawText, fileName, file, fileType, delimiter, placeholders, schema });
+  useEffect(() => {
+    document.title = view === 'workspace' && ws
+      ? `Editing: ${ws.fileName} - Doc Drafter`
+      : 'Doc Drafter - Template Filler';
+  }, [view, ws]);
+
+  const handleParsed = (result: {
+    rawText: string;
+    fileName: string;
+    file: File;
+    fileType: string;
+    delimiter: DelimiterPair;
+    placeholders: string[];
+    schema: JSONSchema | null;
+  }) => {
+    setWs(result);
     setView('workspace');
+  };
+
+  const handleBack = () => {
+    if (!confirm('Discard current form data and start over?')) return;
+    setView('upload');
+    setWs(null);
   };
 
   if (view === 'workspace' && ws) {
     return (
-      <Workspace
-        {...ws}
-        onBack={() => { setView('upload'); setWs(null); }}
-      />
+      <main ref={workspaceRef}>
+        <Workspace {...ws} onBack={handleBack} />
+      </main>
     );
   }
 
-  return <UploadView onParsed={handleParsed} />;
+  return (
+    <main>
+      <UploadView onParsed={handleParsed} />
+    </main>
+  );
 }

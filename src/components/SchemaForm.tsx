@@ -19,12 +19,13 @@ export default function SchemaForm({ schema, formData, onChange }: Props) {
     <div className="schema-form">
       {Object.entries(schema.properties).map(([key, prop]) => (
         <div className="form-group" key={key}>
-          <label>
+          <label htmlFor={`field-${key}`}>
             {prop.title}
-            <span className="field-type">{prop.format || prop.type}</span>
+            <span className="field-type" aria-hidden="true">{prop.format || prop.type}</span>
           </label>
           {prop._multiline ? (
             <textarea
+              id={`field-${key}`}
               value={String(formData[key] ?? '')}
               onChange={(e) => handleChange(key, e.target.value)}
               placeholder={key}
@@ -32,6 +33,7 @@ export default function SchemaForm({ schema, formData, onChange }: Props) {
             />
           ) : (
             <input
+              id={`field-${key}`}
               type={
                 prop.format === 'date'
                   ? 'date'

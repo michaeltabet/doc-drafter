@@ -1,8 +1,9 @@
 import io
+import os
 import re
 import json
-import tempfile
-from pathlib import Path
+import logging
+import unicodedata
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
@@ -15,43 +16,111 @@ from pdf2image import convert_from_bytes
 from PIL import Image
 from docx import Document
 
+# ─── Config ───
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_OCR_PAGES = 20
+OCR_TIMEOUT = 30  # seconds per page
+MAX_IMAGE_PIXELS = 25_000_000
+
+Image.MAX_IMAGE_PIXELS = MAX_IMAGE_PIXELS
+
+ALLOWED_ORIGINS = os.environ.get(
+    "ALLOWED_ORIGINS",
+    "https://drafter.michaeltabet.com"
+).split(",")
+
+ALLOWED_EXTENSIONS = {
+    "pdf", "docx", "png", "jpg", "jpeg", "tiff", "bmp", "gif", "webp",
+    "txt", "md", "html", "htm", "rtf",
+}
+
+TEXT_EXTENSIONS = {"txt", "md", "html", "htm", "rtf", "csv", "xml", "json"}
+
+# ─── Logging ───
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+logger = logging.getLogger("doc-drafter")
+
+# ─── App ───
 app = FastAPI(title="Doc Drafter API")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 
-def extract_pdf_text(data: bytes) -> str:
+# ─── Helpers ───
+
+async def read_upload(file: UploadFile, max_size: int = MAX_FILE_SIZE) -> bytes:
+    """Read an uploaded file in chunks, enforcing size limit before full read."""
+    chunks = []
+    total = 0
+    while True:
+        chunk = await file.read(64 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_size:
+            raise HTTPException(413, f"File too large (max {max_size // (1024*1024)}MB)")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def validate_extension(filename: str) -> str:
+    """Validate file extension and return it."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    if ext not in ALLOWED_EXTENSIONS:
+        raise HTTPException(
+            415,
+            f"Unsupported file type: .{ext}. Supported: {', '.join(sorted(ALLOWED_EXTENSIONS))}"
+        )
+    return ext
+
+
+def sanitize_filename(name: str) -> str:
+    """Sanitize a filename for safe use in Content-Disposition headers."""
+    name = unicodedata.normalize("NFKD", name)
+    name = re.sub(r'[^\w\s\-.]', '', name)
+    name = name.strip()[:200]
+    return name or "document"
+
+
+# ─── Text Extraction ───
+
+def extract_pdf_text(data: bytes) -> tuple[str, list[str]]:
     """Extract text from PDF using pdfplumber, fallback to OCR for scanned pages."""
+    warnings = []
     text_parts = []
-    has_text = False
 
     with pdfplumber.open(io.BytesIO(data)) as pdf:
-        for page in pdf.pages:
+        for page in pdf.pages[:MAX_OCR_PAGES]:
             page_text = page.extract_text() or ""
-            if page_text.strip():
-                text_parts.append(page_text)
-                has_text = True
-            else:
-                text_parts.append("")  # placeholder for OCR
+            text_parts.append(page_text)
+        if len(pdf.pages) > MAX_OCR_PAGES:
+            warnings.append(f"PDF has {len(pdf.pages)} pages, only first {MAX_OCR_PAGES} processed")
 
-    # If any pages had no text, run OCR on those pages
-    if not all(t.strip() for t in text_parts):
+    # OCR fallback for pages with no text
+    empty_pages = [i for i, t in enumerate(text_parts) if not t.strip()]
+    if empty_pages:
         try:
-            images = convert_from_bytes(data)
-            for i, img in enumerate(images):
-                if not text_parts[i].strip():
-                    ocr_text = pytesseract.image_to_string(img)
-                    text_parts[i] = ocr_text
+            for page_idx in empty_pages:
+                images = convert_from_bytes(
+                    data, first_page=page_idx + 1, last_page=page_idx + 1, dpi=150
+                )
+                if images:
+                    ocr_text = pytesseract.image_to_string(images[0], timeout=OCR_TIMEOUT)
+                    text_parts[page_idx] = ocr_text
+                    images[0].close()
         except Exception as e:
-            # If OCR fails, continue with what we have
-            pass
+            logger.warning(f"OCR fallback failed: {e}")
+            warnings.append(f"OCR failed for scanned pages: {e}")
 
-    return "\n\n".join(text_parts)
+    return "\n\n".join(text_parts), warnings
 
 
 def extract_docx_text(data: bytes) -> str:
@@ -60,7 +129,6 @@ def extract_docx_text(data: bytes) -> str:
     parts = []
     for para in doc.paragraphs:
         parts.append(para.text)
-    # Also extract from tables
     for table in doc.tables:
         for row in table.rows:
             row_text = "\t".join(cell.text for cell in row.cells)
@@ -71,31 +139,42 @@ def extract_docx_text(data: bytes) -> str:
 def extract_image_text(data: bytes) -> str:
     """OCR an image file directly."""
     img = Image.open(io.BytesIO(data))
-    return pytesseract.image_to_string(img)
+    if img.width * img.height > MAX_IMAGE_PIXELS:
+        raise HTTPException(413, "Image too large for processing")
+    try:
+        return pytesseract.image_to_string(img, timeout=OCR_TIMEOUT)
+    finally:
+        img.close()
 
 
-def extract_text(data: bytes, filename: str) -> str:
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+def extract_text(data: bytes, filename: str) -> tuple[str, list[str]]:
+    ext = validate_extension(filename)
+    warnings = []
 
     if ext == "pdf":
         return extract_pdf_text(data)
     elif ext == "docx":
-        return extract_docx_text(data)
+        return extract_docx_text(data), warnings
     elif ext in ("png", "jpg", "jpeg", "tiff", "bmp", "gif", "webp"):
-        return extract_image_text(data)
-    else:
-        # Try as plain text
+        return extract_image_text(data), warnings
+    elif ext in TEXT_EXTENSIONS:
         try:
-            return data.decode("utf-8")
+            return data.decode("utf-8"), warnings
         except UnicodeDecodeError:
-            return data.decode("latin-1")
+            raise HTTPException(422, "File does not appear to be valid UTF-8 text")
+    else:
+        raise HTTPException(415, f"Unsupported file type: .{ext}")
 
+
+# ─── Placeholder Logic ───
 
 def find_placeholders(text: str, open_delim: str, close_delim: str) -> list[str]:
+    if not open_delim or not close_delim:
+        raise HTTPException(422, "Delimiters cannot be empty")
     open_esc = re.escape(open_delim)
     close_esc = re.escape(close_delim)
     pattern = open_esc + r"\s*([\w][\w\s.\-]*)\s*" + close_esc
-    found = list(dict.fromkeys(m.strip() for m in re.findall(pattern, text)))
+    found = list(dict.fromkeys(m.strip() for m in re.findall(pattern, text[:500_000])))
     return found
 
 
@@ -142,19 +221,25 @@ def build_schema(placeholders: list[str], title: str) -> dict:
     }
 
 
+# ─── DOCX Filling ───
+
 def fill_docx(data: bytes, open_delim: str, close_delim: str, form_data: dict) -> bytes:
     """Fill a DOCX template preserving formatting."""
     doc = Document(io.BytesIO(data))
 
     def replace_in_paragraph(paragraph):
-        # Combine all runs to find placeholders that span multiple runs
         full_text = "".join(run.text for run in paragraph.runs)
+        has_placeholder = any(
+            f"{open_delim}{key}{close_delim}" in full_text for key in form_data
+        )
+        if not has_placeholder:
+            return
+
         for key, value in form_data.items():
             placeholder = f"{open_delim}{key}{close_delim}"
             if placeholder in full_text:
                 full_text = full_text.replace(placeholder, str(value or ""))
 
-        # Rewrite runs: put all text in first run, clear the rest
         if paragraph.runs:
             paragraph.runs[0].text = full_text
             for run in paragraph.runs[1:]:
@@ -169,7 +254,6 @@ def fill_docx(data: bytes, open_delim: str, close_delim: str, form_data: dict) -
                 for para in cell.paragraphs:
                     replace_in_paragraph(para)
 
-    # Also handle headers/footers
     for section in doc.sections:
         for header_para in section.header.paragraphs:
             replace_in_paragraph(header_para)
@@ -182,18 +266,23 @@ def fill_docx(data: bytes, open_delim: str, close_delim: str, form_data: dict) -
     return buf.read()
 
 
+# ─── Endpoints ───
+# Using `def` (not `async def`) so FastAPI runs blocking I/O in a thread pool
+
 @app.post("/api/parse")
-async def parse_template(
+def parse_template(
     file: UploadFile = File(...),
     open_delim: str = Form("{{"),
     close_delim: str = Form("}}"),
 ):
-    data = await file.read()
-    if len(data) > 50 * 1024 * 1024:  # 50MB limit
-        raise HTTPException(413, "File too large (max 50MB)")
+    import asyncio
+    data = asyncio.get_event_loop().run_until_complete(read_upload(file))
 
     filename = file.filename or "document"
-    text = extract_text(data, filename)
+    validate_extension(filename)
+
+    logger.info(f"Parsing: {filename} ({len(data)} bytes)")
+    text, warnings = extract_text(data, filename)
 
     if not text.strip():
         raise HTTPException(422, "Could not extract any text from this file")
@@ -207,32 +296,48 @@ async def parse_template(
         "placeholders": placeholders,
         "schema": schema,
         "filename": filename,
+        "warnings": warnings,
     }
 
 
 @app.post("/api/generate")
-async def generate_document(
+def generate_document(
     file: UploadFile = File(...),
     open_delim: str = Form("{{"),
     close_delim: str = Form("}}"),
     form_data: str = Form("{}"),
 ):
-    data = await file.read()
-    parsed_data = json.loads(form_data)
+    import asyncio
+    data = asyncio.get_event_loop().run_until_complete(read_upload(file))
+
+    try:
+        parsed_data = json.loads(form_data)
+    except json.JSONDecodeError as e:
+        raise HTTPException(422, f"Invalid JSON in form_data: {e}")
+
+    if not isinstance(parsed_data, dict):
+        raise HTTPException(422, "form_data must be a JSON object")
+    if any(not isinstance(v, (str, int, float, bool, type(None))) for v in parsed_data.values()):
+        raise HTTPException(422, "form_data values must be scalar types")
+
     filename = file.filename or "document"
-    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    ext = validate_extension(filename)
+
+    logger.info(f"Generating: {filename} ({len(data)} bytes, {len(parsed_data)} fields)")
+
+    safe_name = sanitize_filename(filename.rsplit(".", 1)[0])
 
     if ext == "docx":
         filled = fill_docx(data, open_delim, close_delim, parsed_data)
-        output_name = filename.rsplit(".", 1)[0] + "_filled.docx"
+        output_name = f"{safe_name}_filled.docx"
         media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     else:
-        text = extract_text(data, filename)
+        text, _ = extract_text(data, filename)
         for key, value in parsed_data.items():
             pattern = re.escape(open_delim) + r"\s*" + re.escape(key) + r"\s*" + re.escape(close_delim)
             text = re.sub(pattern, str(value or ""), text)
         filled = text.encode("utf-8")
-        output_name = filename.rsplit(".", 1)[0] + "_filled.txt"
+        output_name = f"{safe_name}_filled.txt"
         media_type = "text/plain"
 
     return StreamingResponse(
@@ -244,16 +349,4 @@ async def generate_document(
 
 @app.get("/api/health")
 async def health():
-    # Check tesseract is available
-    try:
-        version = pytesseract.get_tesseract_version()
-        ocr_available = True
-    except Exception:
-        version = None
-        ocr_available = False
-
-    return {
-        "status": "ok",
-        "ocr_available": ocr_available,
-        "tesseract_version": str(version) if version else None,
-    }
+    return {"status": "ok"}

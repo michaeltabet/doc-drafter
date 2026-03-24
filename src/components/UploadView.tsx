@@ -1,18 +1,20 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { DELIMITER_PRESETS } from '../types';
-import type { DelimiterPair } from '../types';
+import type { DelimiterPair, JSONSchema } from '../types';
 import { parseTemplate } from '../lib/api';
 
+interface ParsedResult {
+  rawText: string;
+  fileName: string;
+  file: File;
+  fileType: string;
+  delimiter: DelimiterPair;
+  placeholders: string[];
+  schema: JSONSchema | null;
+}
+
 interface Props {
-  onParsed: (
-    rawText: string,
-    fileName: string,
-    file: File,
-    fileType: string,
-    delimiter: DelimiterPair,
-    placeholders: string[],
-    schema: any
-  ) => void;
+  onParsed: (result: ParsedResult) => void;
 }
 
 export default function UploadView({ onParsed }: Props) {
@@ -23,8 +25,14 @@ export default function UploadView({ onParsed }: Props) {
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [previewResult, setPreviewResult] = useState<{ placeholders: string[]; text: string } | null>(null);
+  const [previewResult, setPreviewResult] = useState<{
+    placeholders: string[];
+    text: string;
+    filename: string;
+    schema: JSONSchema | null;
+  } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const delimRef = useRef<HTMLHeadingElement>(null);
 
   const activeDelim = customOpen && customClose
     ? { open: customOpen, close: customClose, label: 'custom' }
@@ -36,11 +44,23 @@ export default function UploadView({ onParsed }: Props) {
     setPreviewResult(null);
   }, []);
 
+  useEffect(() => {
+    if (file && delimRef.current) delimRef.current.focus();
+  }, [file]);
+
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragOver(false);
-      if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+      const f = e.dataTransfer.files[0];
+      if (!f) return;
+      const ext = f.name.split('.').pop()?.toLowerCase() || '';
+      const allowed = ['docx','pdf','txt','md','html','rtf','png','jpg','jpeg','tiff','bmp'];
+      if (!allowed.includes(ext)) {
+        setError(`Unsupported file type: .${ext}`);
+        return;
+      }
+      handleFile(f);
     },
     [handleFile]
   );
@@ -51,35 +71,40 @@ export default function UploadView({ onParsed }: Props) {
     setError('');
     try {
       const result = await parseTemplate(file, activeDelim.open, activeDelim.close);
-      setPreviewResult({ placeholders: result.placeholders, text: result.text });
-    } catch (e: any) {
-      setError(e.message || 'Failed to parse');
+      setPreviewResult(result);
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : 'Failed to parse');
     } finally {
       setLoading(false);
     }
   };
 
-  const handleContinue = async () => {
+  const handleContinue = () => {
     if (!file || !previewResult) return;
-    setLoading(true);
-    setError('');
-    try {
-      const result = await parseTemplate(file, activeDelim.open, activeDelim.close);
-      const ext = file.name.split('.').pop()?.toLowerCase() || '';
-      onParsed(result.text, result.filename, file, ext, activeDelim, result.placeholders, result.schema);
-    } catch (e: any) {
-      setError(e.message || 'Failed to parse');
-    } finally {
-      setLoading(false);
-    }
+    const ext = file.name.split('.').pop()?.toLowerCase() || '';
+    onParsed({
+      rawText: previewResult.text,
+      fileName: previewResult.filename,
+      file,
+      fileType: ext,
+      delimiter: activeDelim,
+      placeholders: previewResult.placeholders,
+      schema: previewResult.schema,
+    });
   };
 
-  // Re-preview when delimiter changes
   const handleDelimChange = (d: DelimiterPair) => {
     setDelimiter(d);
     setCustomOpen('');
     setCustomClose('');
     setPreviewResult(null);
+  };
+
+  const handleDropZoneKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      fileRef.current?.click();
+    }
   };
 
   return (
@@ -94,20 +119,24 @@ export default function UploadView({ onParsed }: Props) {
 
       <div
         className={`drop-zone ${dragOver ? 'dragover' : ''} ${file ? 'has-file' : ''}`}
+        role="button"
+        tabIndex={0}
+        aria-label={file ? `Selected file: ${file.name}. Click to change file.` : 'Upload a template file. Accepts DOCX, PDF, images, and text files.'}
         onClick={() => fileRef.current?.click()}
+        onKeyDown={handleDropZoneKeyDown}
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
         onDragLeave={() => setDragOver(false)}
         onDrop={handleDrop}
       >
         {file ? (
           <>
-            <div className="file-icon">📄</div>
+            <div className="file-icon" aria-hidden="true">&#x1F4C4;</div>
             <h2>{file.name}</h2>
             <p>{(file.size / 1024).toFixed(1)} KB</p>
           </>
         ) : (
           <>
-            <div className="file-icon">+</div>
+            <div className="file-icon" aria-hidden="true">+</div>
             <h2>Drop your template here</h2>
             <p>DOCX, PDF (text or scanned), images, TXT, or any text file</p>
           </>
@@ -115,40 +144,44 @@ export default function UploadView({ onParsed }: Props) {
         <input
           ref={fileRef}
           type="file"
+          aria-label="Upload template file"
           accept=".docx,.pdf,.txt,.md,.html,.rtf,.png,.jpg,.jpeg,.tiff,.bmp"
           onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
         />
       </div>
 
-      {error && <div className="error-msg">{error}</div>}
+      {error && <div className="error-msg" role="alert">{error}</div>}
 
       {file && (
         <div className="delimiter-picker">
-          <h3>What are your placeholders wrapped in?</h3>
-          <div className="delim-row">
+          <h2 ref={delimRef} tabIndex={-1}>What are your placeholders wrapped in?</h2>
+          <div className="delim-row" role="group" aria-label="Delimiter presets">
             {DELIMITER_PRESETS.map((d) => (
               <button
                 key={d.label}
                 className={`delim-btn ${delimiter === d && !customOpen ? 'active' : ''}`}
+                aria-pressed={delimiter === d && !customOpen}
                 onClick={() => handleDelimChange(d)}
               >
                 {d.label}
               </button>
             ))}
             <div className="custom-delim">
-              <span>custom:</span>
+              <span aria-hidden="true">custom:</span>
               <input
                 value={customOpen}
                 onChange={(e) => { setCustomOpen(e.target.value); setPreviewResult(null); }}
                 placeholder="<<"
                 maxLength={4}
+                aria-label="Custom opening delimiter"
               />
-              <span>...</span>
+              <span aria-hidden="true">...</span>
               <input
                 value={customClose}
                 onChange={(e) => { setCustomClose(e.target.value); setPreviewResult(null); }}
                 placeholder=">>"
                 maxLength={4}
+                aria-label="Custom closing delimiter"
               />
             </div>
           </div>
@@ -157,36 +190,39 @@ export default function UploadView({ onParsed }: Props) {
             <button
               className="parse-btn"
               disabled={loading}
+              aria-busy={loading}
               onClick={handlePreview}
             >
               {loading ? 'Parsing...' : 'Scan for Placeholders'}
             </button>
           )}
 
-          {previewResult && (
-            <div className="placeholder-preview">
-              {previewResult.placeholders.length > 0 ? (
-                <>
-                  <span className="found">
-                    Found {previewResult.placeholders.length} placeholder{previewResult.placeholders.length !== 1 ? 's' : ''}:{' '}
-                    {previewResult.placeholders.slice(0, 6).join(', ')}
-                    {previewResult.placeholders.length > 6 ? '...' : ''}
+          <div role="status" aria-live="polite">
+            {previewResult && (
+              <div className="placeholder-preview">
+                {previewResult.placeholders.length > 0 ? (
+                  <>
+                    <span className="found">
+                      Found {previewResult.placeholders.length} placeholder{previewResult.placeholders.length !== 1 ? 's' : ''}:{' '}
+                      {previewResult.placeholders.slice(0, 6).join(', ')}
+                      {previewResult.placeholders.length > 6 ? '...' : ''}
+                    </span>
+                    <button
+                      className="parse-btn"
+                      disabled={loading}
+                      onClick={handleContinue}
+                    >
+                      Continue — Fill Template
+                    </button>
+                  </>
+                ) : (
+                  <span className="not-found">
+                    No placeholders found with these delimiters. Text extracted ({previewResult.text.length.toLocaleString()} chars) — try different delimiters.
                   </span>
-                  <button
-                    className="parse-btn"
-                    disabled={loading}
-                    onClick={handleContinue}
-                  >
-                    {loading ? 'Loading...' : 'Continue — Fill Template'}
-                  </button>
-                </>
-              ) : (
-                <span className="not-found">
-                  No placeholders found with these delimiters. Text extracted ({previewResult.text.length.toLocaleString()} chars) — try different delimiters.
-                </span>
-              )}
-            </div>
-          )}
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </div>
