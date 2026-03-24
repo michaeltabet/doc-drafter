@@ -267,16 +267,14 @@ def fill_docx(data: bytes, open_delim: str, close_delim: str, form_data: dict) -
 
 
 # ─── Endpoints ───
-# Using `def` (not `async def`) so FastAPI runs blocking I/O in a thread pool
 
 @app.post("/api/parse")
-def parse_template(
+async def parse_template(
     file: UploadFile = File(...),
     open_delim: str = Form("{{"),
     close_delim: str = Form("}}"),
 ):
-    import asyncio
-    data = asyncio.get_event_loop().run_until_complete(read_upload(file))
+    data = await read_upload(file)
 
     filename = file.filename or "document"
     validate_extension(filename)
@@ -301,14 +299,13 @@ def parse_template(
 
 
 @app.post("/api/generate")
-def generate_document(
+async def generate_document(
     file: UploadFile = File(...),
     open_delim: str = Form("{{"),
     close_delim: str = Form("}}"),
     form_data: str = Form("{}"),
 ):
-    import asyncio
-    data = asyncio.get_event_loop().run_until_complete(read_upload(file))
+    data = await read_upload(file)
 
     try:
         parsed_data = json.loads(form_data)
