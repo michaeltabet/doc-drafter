@@ -1,44 +1,39 @@
 import { useState, useRef, useCallback } from 'react';
 import { DELIMITER_PRESETS } from '../types';
 import type { DelimiterPair } from '../types';
-import { extractText, extractPlaceholders } from '../lib/parser';
+import { parseTemplate } from '../lib/api';
 
 interface Props {
   onParsed: (
     rawText: string,
     fileName: string,
-    fileData: ArrayBuffer,
+    file: File,
     fileType: string,
     delimiter: DelimiterPair,
-    placeholders: string[]
+    placeholders: string[],
+    schema: any
   ) => void;
 }
 
 export default function UploadView({ onParsed }: Props) {
   const [file, setFile] = useState<File | null>(null);
-  const [rawText, setRawText] = useState('');
   const [delimiter, setDelimiter] = useState<DelimiterPair>(DELIMITER_PRESETS[0]);
   const [customOpen, setCustomOpen] = useState('');
   const [customClose, setCustomClose] = useState('');
   const [dragOver, setDragOver] = useState(false);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [previewResult, setPreviewResult] = useState<{ placeholders: string[]; text: string } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   const activeDelim = customOpen && customClose
     ? { open: customOpen, close: customClose, label: 'custom' }
     : delimiter;
 
-  const placeholders = rawText ? extractPlaceholders(rawText, activeDelim) : [];
-
-  const handleFile = useCallback(async (f: File) => {
+  const handleFile = useCallback((f: File) => {
     setFile(f);
     setError('');
-    try {
-      const text = await extractText(f);
-      setRawText(text);
-    } catch (e: any) {
-      setError(e.message || 'Failed to read file');
-    }
+    setPreviewResult(null);
   }, []);
 
   const handleDrop = useCallback(
@@ -50,11 +45,41 @@ export default function UploadView({ onParsed }: Props) {
     [handleFile]
   );
 
-  const handleParse = async () => {
-    if (!file || placeholders.length === 0) return;
-    const ab = await file.arrayBuffer();
-    const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    onParsed(rawText, file.name, ab, ext, activeDelim, placeholders);
+  const handlePreview = async () => {
+    if (!file) return;
+    setLoading(true);
+    setError('');
+    try {
+      const result = await parseTemplate(file, activeDelim.open, activeDelim.close);
+      setPreviewResult({ placeholders: result.placeholders, text: result.text });
+    } catch (e: any) {
+      setError(e.message || 'Failed to parse');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleContinue = async () => {
+    if (!file || !previewResult) return;
+    setLoading(true);
+    setError('');
+    try {
+      const result = await parseTemplate(file, activeDelim.open, activeDelim.close);
+      const ext = file.name.split('.').pop()?.toLowerCase() || '';
+      onParsed(result.text, result.filename, file, ext, activeDelim, result.placeholders, result.schema);
+    } catch (e: any) {
+      setError(e.message || 'Failed to parse');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Re-preview when delimiter changes
+  const handleDelimChange = (d: DelimiterPair) => {
+    setDelimiter(d);
+    setCustomOpen('');
+    setCustomClose('');
+    setPreviewResult(null);
   };
 
   return (
@@ -64,6 +89,7 @@ export default function UploadView({ onParsed }: Props) {
         <p className="tagline">
           Open-source document template filler. Upload a contract, fill a form, generate the document — without breaking the formatting.
         </p>
+        <p className="tagline sub">Supports scanned PDFs with OCR, DOCX, images, and plain text files.</p>
       </div>
 
       <div
@@ -77,26 +103,26 @@ export default function UploadView({ onParsed }: Props) {
           <>
             <div className="file-icon">📄</div>
             <h2>{file.name}</h2>
-            <p>{(file.size / 1024).toFixed(1)} KB — {rawText.length.toLocaleString()} characters extracted</p>
+            <p>{(file.size / 1024).toFixed(1)} KB</p>
           </>
         ) : (
           <>
             <div className="file-icon">+</div>
             <h2>Drop your template here</h2>
-            <p>DOCX, PDF, TXT, or any text file with placeholders</p>
+            <p>DOCX, PDF (text or scanned), images, TXT, or any text file</p>
           </>
         )}
         <input
           ref={fileRef}
           type="file"
-          accept=".docx,.pdf,.txt,.md,.html,.rtf"
+          accept=".docx,.pdf,.txt,.md,.html,.rtf,.png,.jpg,.jpeg,.tiff,.bmp"
           onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
         />
       </div>
 
       {error && <div className="error-msg">{error}</div>}
 
-      {file && rawText && (
+      {file && (
         <div className="delimiter-picker">
           <h3>What are your placeholders wrapped in?</h3>
           <div className="delim-row">
@@ -104,11 +130,7 @@ export default function UploadView({ onParsed }: Props) {
               <button
                 key={d.label}
                 className={`delim-btn ${delimiter === d && !customOpen ? 'active' : ''}`}
-                onClick={() => {
-                  setDelimiter(d);
-                  setCustomOpen('');
-                  setCustomClose('');
-                }}
+                onClick={() => handleDelimChange(d)}
               >
                 {d.label}
               </button>
@@ -117,39 +139,54 @@ export default function UploadView({ onParsed }: Props) {
               <span>custom:</span>
               <input
                 value={customOpen}
-                onChange={(e) => setCustomOpen(e.target.value)}
+                onChange={(e) => { setCustomOpen(e.target.value); setPreviewResult(null); }}
                 placeholder="<<"
                 maxLength={4}
               />
               <span>...</span>
               <input
                 value={customClose}
-                onChange={(e) => setCustomClose(e.target.value)}
+                onChange={(e) => { setCustomClose(e.target.value); setPreviewResult(null); }}
                 placeholder=">>"
                 maxLength={4}
               />
             </div>
           </div>
 
-          <div className="placeholder-preview">
-            {placeholders.length > 0 ? (
-              <span className="found">
-                Found {placeholders.length} placeholder{placeholders.length !== 1 ? 's' : ''}:{' '}
-                {placeholders.slice(0, 6).join(', ')}
-                {placeholders.length > 6 ? '...' : ''}
-              </span>
-            ) : (
-              <span className="not-found">No placeholders found with these delimiters</span>
-            )}
-          </div>
+          {!previewResult && (
+            <button
+              className="parse-btn"
+              disabled={loading}
+              onClick={handlePreview}
+            >
+              {loading ? 'Parsing...' : 'Scan for Placeholders'}
+            </button>
+          )}
 
-          <button
-            className="parse-btn"
-            disabled={placeholders.length === 0}
-            onClick={handleParse}
-          >
-            Continue — Fill Template
-          </button>
+          {previewResult && (
+            <div className="placeholder-preview">
+              {previewResult.placeholders.length > 0 ? (
+                <>
+                  <span className="found">
+                    Found {previewResult.placeholders.length} placeholder{previewResult.placeholders.length !== 1 ? 's' : ''}:{' '}
+                    {previewResult.placeholders.slice(0, 6).join(', ')}
+                    {previewResult.placeholders.length > 6 ? '...' : ''}
+                  </span>
+                  <button
+                    className="parse-btn"
+                    disabled={loading}
+                    onClick={handleContinue}
+                  >
+                    {loading ? 'Loading...' : 'Continue — Fill Template'}
+                  </button>
+                </>
+              ) : (
+                <span className="not-found">
+                  No placeholders found with these delimiters. Text extracted ({previewResult.text.length.toLocaleString()} chars) — try different delimiters.
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

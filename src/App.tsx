@@ -9,10 +9,11 @@ type View = 'upload' | 'workspace';
 interface WorkspaceState {
   rawText: string;
   fileName: string;
-  fileData: ArrayBuffer;
+  file: File;
   fileType: string;
   delimiter: DelimiterPair;
   placeholders: string[];
+  schema: any;
 }
 
 export default function App() {
@@ -22,12 +23,13 @@ export default function App() {
   const handleParsed = (
     rawText: string,
     fileName: string,
-    fileData: ArrayBuffer,
+    file: File,
     fileType: string,
     delimiter: DelimiterPair,
-    placeholders: string[]
+    placeholders: string[],
+    schema: any
   ) => {
-    setWs({ rawText, fileName, fileData, fileType, delimiter, placeholders });
+    setWs({ rawText, fileName, file, fileType, delimiter, placeholders, schema });
     setView('workspace');
   };
 
@@ -35,10 +37,7 @@ export default function App() {
     return (
       <Workspace
         {...ws}
-        onBack={() => {
-          setView('upload');
-          setWs(null);
-        }}
+        onBack={() => { setView('upload'); setWs(null); }}
       />
     );
   }

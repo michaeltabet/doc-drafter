@@ -1,7 +1,20 @@
 services:
-  doc-drafter:
-    build: .
-    container_name: doc-drafter
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: doc-drafter-frontend
     restart: unless-stopped
     ports:
       - "8230:80"
+    depends_on:
+      - backend
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: doc-drafter-backend
+    restart: unless-stopped
+    expose:
+      - "8000"
