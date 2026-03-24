@@ -97,7 +97,11 @@ def extract_pdf_text(data: bytes) -> tuple[str, list[str]]:
     warnings = []
     text_parts = []
 
-    with pdfplumber.open(io.BytesIO(data)) as pdf:
+    try:
+        pdf_file = pdfplumber.open(io.BytesIO(data))
+    except Exception as e:
+        raise HTTPException(422, f"Invalid or corrupted PDF file: {e}")
+    with pdf_file as pdf:
         for page in pdf.pages[:MAX_OCR_PAGES]:
             page_text = page.extract_text() or ""
             text_parts.append(page_text)
@@ -125,7 +129,10 @@ def extract_pdf_text(data: bytes) -> tuple[str, list[str]]:
 
 def extract_docx_text(data: bytes) -> str:
     """Extract text from DOCX preserving paragraph structure."""
-    doc = Document(io.BytesIO(data))
+    try:
+        doc = Document(io.BytesIO(data))
+    except Exception as e:
+        raise HTTPException(422, f"Invalid or corrupted DOCX file: {e}")
     parts = []
     for para in doc.paragraphs:
         parts.append(para.text)
@@ -138,7 +145,10 @@ def extract_docx_text(data: bytes) -> str:
 
 def extract_image_text(data: bytes) -> str:
     """OCR an image file directly."""
-    img = Image.open(io.BytesIO(data))
+    try:
+        img = Image.open(io.BytesIO(data))
+    except Exception as e:
+        raise HTTPException(422, f"Invalid or corrupted image file: {e}")
     if img.width * img.height > MAX_IMAGE_PIXELS:
         raise HTTPException(413, "Image too large for processing")
     try:
